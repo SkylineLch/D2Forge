@@ -27,6 +27,10 @@ const fs = require('fs');
 const root = path.resolve(__dirname, '..');
 const dev = process.argv.includes('--dev');
 
+// Everything except our own flags goes to the electron process, so callers can
+// pass e.g. `--ui-check` through.
+const passthrough = process.argv.slice(2).filter((a) => a !== '--dev');
+
 /* ------------------------------ resolve binary ----------------------------- */
 
 let electronBinary;
@@ -78,7 +82,7 @@ if (dev) {
   delete env.NODE_ENV;
 }
 
-const child = spawn(electronBinary, [root], {
+const child = spawn(electronBinary, [root, ...passthrough], {
   stdio: 'inherit',
   env,
   windowsHide: false,

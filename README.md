@@ -25,15 +25,27 @@ matchmaking.**
 
 - **Hierarchical browsing** — heroes → abilities → values, items → properties.
   No digging through flat name lists.
+- **Skills and talents first** — the hero panel opens with abilities and the
+  talent tree at the top, then stats. Every section is a collapsible accordion,
+  so you expand only what you need instead of scrolling past everything.
+- **Mixed search** — type Chinese, English, or the raw internal name
+  (`幻影`, `anti`, `npc_dota_hero_axe`) into one box.
 - **Survives game updates** — re-index the VPK after a patch; edits whose
   underlying value is unchanged keep applying, edits whose target moved are
   reported instead of silently corrupting the file.
 - **Every edit is visible** — modified fields are highlighted and always show the
   original value next to your new one.
 - **Bilingual UI** — Chinese and English, using the game's own localization
-  tokens so ability and item names match what you see in game.
-- **Reversible** — revert a single field, or remove the whole override and
-  restore `gameinfo.gi` byte-for-byte.
+  tokens so ability and item names match what you see in game. 98% of ability
+  value labels resolve to Chinese; the remainder are boolean flags
+  (`is_global`, `has_multishot`) that are not meaningful to edit anyway.
+- **Reversible at three levels**:
+  - *per field* — revert one value
+  - *一键还原* — clear all edits
+  - *恢复原版* — unmount the override and restore `gameinfo.gi` byte-for-byte
+
+  The last two are what you use to hop between an edited and a clean game for
+  online play.
 
 ## Requirements
 

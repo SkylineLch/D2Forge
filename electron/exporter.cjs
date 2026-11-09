@@ -18,6 +18,20 @@ const gameinfo = require('./gameinfo.cjs');
 const OVERRIDE_DIR = '0test';
 const OVERRIDE_PACK = 'pak01_dir.vpk';
 
+/**
+ * Where the gameinfo.gi backup lives.
+ *
+ * Must be the SAME path for activate and revert. It used to be computed two
+ * different ways — activate wrote `<game>/data/gameinfo.gi.orig` while revert
+ * looked in `<process.cwd()>/data/`, which in a packaged build is somewhere
+ * else entirely. Revert then silently found no backup, left the `Game 0test`
+ * line in place, and the status pill kept claiming the override was live even
+ * though the VPK was gone. Keep it in one function.
+ */
+function backupDirFor(gamePath) {
+  return path.join(gamePath, 'data');
+}
+
 /* --------------------- value replacement in KV text --------------------- */
 
 function escapeRegex(s) {
@@ -131,6 +145,74 @@ function setAbilityValueInBlock(text, blockStart, key, newValue) {
   return text;
 }
 
+/**
+ * Replace a talent modifier line inside one AbilityValues entry.
+ *
+ * Hero talents are stored as an extra key on the affected value object:
+ *
+ *     "arrow_damage_pct"
+ *     {
+ *         "value"                                  "80 100 120 140"
+ *         "special_bonus_unique_drow_ranger_1"     "+25"
+ *     }
+ *
+ * so the target is a two-level path: the entry key first, then the talent id
+ * inside it. Missing keys are appended, which keeps legacy files editable.
+ *
+ * @param {string} text
+ * @param {number} blockStart offset of the AbilityValues `{`
+ * @param {string} entryKey   e.g. 'arrow_damage_pct'
+ * @param {string} talentId   e.g. 'special_bonus_unique_drow_ranger_1'
+ * @param {string} newValue   e.g. '+30'
+ */
+function setTalentModifierInBlock(text, blockStart, entryKey, talentId, newValue) {
+  const end = matchingBrace(text, blockStart);
+  if (end === -1) return text;
+
+  const segment = text.slice(blockStart, end);
+  const safe = String(newValue).replace(/"/g, '\\"');
+
+  // Locate the entry key at depth 1 of the AbilityValues block.
+  const keyRe = new RegExp(`(["'])${escapeRegex(entryKey)}\\1`, 'g');
+  let m;
+  while ((m = keyRe.exec(segment)) !== null) {
+    const before = segment.slice(0, m.index);
+    const opens = (before.match(/\{/g) || []).length;
+    const closes = (before.match(/\}/g) || []).length;
+    if (opens !== closes + 1) continue;
+
+    let p = m.index + m[0].length;
+    while (p < segment.length && /[ \t\r\n]/.test(segment[p])) p++;
+
+    if (segment[p] !== '{') continue; // scalar entry cannot host a modifier
+    const objEnd = matchingBrace(segment, p);
+    if (objEnd === -1) return text;
+    const inner = segment.slice(p, objEnd); // includes both braces
+
+    // Is the talent key already present inside this object?
+    const modRe = new RegExp(
+      `(["'])${escapeRegex(talentId)}\\1([ \\t]+)("(?:[^"\\\\]|\\\\.)*"|[^\\s{}"'\\r\\n]+)`
+    );
+    let newInner;
+    if (modRe.test(inner)) {
+      newInner = inner.replace(modRe, (full, q, gap) => `"${talentId}"${gap}"${safe}"`);
+    } else {
+      // Append before the closing brace, matching the surrounding indentation.
+      const insertAt = inner.lastIndexOf('}');
+      const lineStart = inner.lastIndexOf('\n', insertAt);
+      const indent = lineStart === -1 ? '\t\t\t\t\t' : inner.slice(lineStart + 1, insertAt).match(/^[ \t]*/)[0];
+      newInner = inner.slice(0, insertAt) +
+                 `${indent}\t"${talentId}"\t\t"${safe}"\n` +
+                 indent + inner.slice(insertAt);
+    }
+
+    return text.slice(0, blockStart) + segment.slice(0, p) + newInner +
+           segment.slice(objEnd) + text.slice(end);
+  }
+
+  return text;
+}
+
 /** Index of the `}` matching the `{` at `open`, or -1. */
 function matchingBrace(text, open) {
   if (text[open] !== '{') return -1;
@@ -213,24 +295,29 @@ function groupChanges(changes) {
   const byFile = new Map();
 
   for (const ch of changes) {
-    const { file, objectPath, field, kind } = locate(ch);
+    const { file, objectPath, field, kind, modifier } = locate(ch);
     if (!file) continue;
     if (!byFile.has(file)) byFile.set(file, new Map());
     const objMap = byFile.get(file);
-    const pk = objectPath.join('\u0000');
+    // The grouping key must include the write strategy, not just the block:
+    // one AbilityValues block can hold plain values, talent modifiers and
+    // custom keys at once, and they are replaced by different functions.
+    const pk = [objectPath.join('\u0000'), kind, modifier || ''].join('\u0001');
     if (!objMap.has(pk)) objMap.set(pk, { path: objectPath, kind, fields: [] });
     // Value is stored under `field` for scalars, and under the value key for
     // AbilityValues entries — `locate` already resolved that for us.
-    objMap.get(pk).fields.push({ field, newValue: ch.newValue });
+    objMap.get(pk).fields.push({ field, newValue: ch.newValue, modifier });
   }
   return byFile;
 }
 
 /** Map a change to (data file, KV path inside that file). */
 function locate(ch) {
-  // Frontend passes category='heroes'/'items', field='MovementSpeed' or 'abilities.xxx.values.yyy'.
+  // Frontend passes category='heroes'/'items', field='MovementSpeed' or
+  // 'abilities.xxx.values.yyy'. Talents use the same shape as abilities but
+  // live in the shared npc_abilities.txt, not the hero file.
   const cat = ch.category === 'heroes' ? 'hero' : ch.category === 'items' ? 'item' : ch.category;
-  
+
   if (cat === 'hero') {
     const parts = ch.field.split('.');
     if (parts[0] === 'abilities' && parts.length >= 2) {
@@ -252,6 +339,40 @@ function locate(ch) {
           objectPath: ['DOTAHeroes', ch.id, 'AbilityDefinitions', abilityId],
           field: rest[rest.length - 1],
           kind: 'scalar',
+        };
+      }
+    }
+    // Talents. Two storage shapes, decided by where the bonus actually lives:
+    //
+    //   talents.<talentId>.bonus   -> a modifier line inside one of the hero's
+    //                                 abilities (hero-specific talents)
+    //   talents.<talentId>.value   -> the talent's own AbilityValues entry in
+    //                                 the shared npc_abilities.txt (generic ones)
+    //
+    // The renderer knows which one applies and sends the matching key, so all
+    // this has to do is map the key onto a file + block + field.
+    if (parts[0] === 'talents' && parts.length >= 3) {
+      const talentId = parts[1];
+      const rest = parts.slice(2);
+
+      if (rest[0] === 'bonus' && rest.length === 3) {
+        // talents.<talent>.bonus.<abilityId>.<entryKey>
+        return {
+          file: `scripts/npc/heroes/${ch.id}.txt`,
+          objectPath: ['DOTAHeroes', ch.id, 'AbilityDefinitions', rest[1], 'AbilityValues'],
+          field: rest[2],
+          modifier: talentId,
+          kind: 'talentModifier',
+        };
+      }
+
+      const last = rest[rest.length - 1];
+      if (rest[0] === 'value' || rest[0] === 'values') {
+        return {
+          file: 'scripts/npc/npc_abilities.txt',
+          objectPath: ['DOTAAbilities', talentId, 'AbilityValues'],
+          field: last,
+          kind: 'abilityValue',
         };
       }
     }
@@ -324,7 +445,9 @@ function apply(gamePath, changes) {
         }
         const next = kind === 'abilityValue'
           ? setAbilityValueInBlock(text, offset, f.field, f.newValue)
-          : setFieldInBlock(text, offset, f.field, f.newValue);
+          : kind === 'talentModifier'
+            ? setTalentModifierInBlock(text, offset, f.field, f.modifier, f.newValue)
+            : setFieldInBlock(text, offset, f.field, f.newValue);
         if (next !== text) { text = next; applied++; }
         else console.warn(`[export] no change: ${relFile} :: ${objPath.join('.')}.${f.field}`);
       }
@@ -341,8 +464,7 @@ function apply(gamePath, changes) {
 
   writeVpk(vpkPath, output);
 
-  const gi = gameinfo.activate(gamePath, path.join(path.dirname(vpkPath), '..', '..', 'data'), OVERRIDE_DIR)
-    || {};
+  const gi = gameinfo.activate(gamePath, backupDirFor(gamePath), OVERRIDE_DIR) || {};
 
   return {
     files: output.map((o) => o.rel),
@@ -365,7 +487,16 @@ function revert(gamePath) {
     if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
   } catch { /* ignore */ }
 
-  const gi = gameinfo.revert(gamePath, path.join(process.cwd(), 'data'));
+  // Restore from the backup taken at activate time. Both sides now derive the
+  // directory from the game path, so a packaged build can't miss it.
+  let gi = gameinfo.revert(gamePath, backupDirFor(gamePath));
+
+  // No backup (fresh clone, Steam "verify integrity", leftover state from an
+  // older build): strip the line ourselves so the game still ends up vanilla.
+  if (!gi.changed) {
+    gi = gameinfo.deactivate(gamePath, OVERRIDE_DIR);
+  }
+
   return { removed, gameinfo: gi };
 }
 
@@ -377,13 +508,134 @@ function status(gamePath) {
   };
 }
 
+/**
+ * Reconcile saved changes against the currently installed game files.
+ *
+ * Called after a game patch. For each saved change we look up what the *game*
+ * now says for that field:
+ *
+ *   - field exists, value equals the value we recorded at edit time
+ *       -> the patch did not touch it; keep the edit, no action needed
+ *   - field exists, value differs from what we recorded
+ *       -> the patch changed it; drop the user's edit and report, so the user
+ *          re-decides instead of silently running a stale override
+ *   - field no longer exists
+ *       -> obsoleted by the patch; drop it
+ *
+ * Returns the surviving changes plus a report of what was dropped and why.
+ *
+ * @param {string} gamePath
+ * @param {Array} changes
+ * @param {(file: string) => string|null} readFile reads a VPK entry as utf8
+ */
+function reconcile(gamePath, changes, readFile) {
+  const parseKV = require('./kv-parser.cjs').parseKV;
+
+  const fileCache = new Map();
+  const getTree = (file) => {
+    if (fileCache.has(file)) return fileCache.get(file);
+    const text = readFile(file);
+    let tree = null;
+    if (text) {
+      try {
+        tree = parseKV(text).root;
+      } catch {
+        tree = null;
+      }
+    }
+    fileCache.set(file, tree);
+    return tree;
+  };
+
+  const kept = [];
+  const dropped = [];
+  const unchanged = [];
+
+  for (const ch of changes) {
+    const loc = locate(ch);
+    if (!loc.file) {
+      dropped.push({ ...ch, reason: 'unmapped' });
+      continue;
+    }
+
+    const tree = getTree(loc.file);
+    if (!tree) {
+      dropped.push({ ...ch, reason: 'file-missing', file: loc.file });
+      continue;
+    }
+
+    // Walk to the owning object, then read the field.
+    let node = tree;
+    let ok = true;
+    for (const seg of loc.objectPath) {
+      if (!node || typeof node !== 'object' || !(seg in node)) {
+        ok = false;
+        break;
+      }
+      node = node[seg];
+    }
+    if (!ok) {
+      dropped.push({ ...ch, reason: 'object-missing', file: loc.file });
+      continue;
+    }
+
+    const entry = node[loc.field];
+    if (entry === undefined) {
+      dropped.push({ ...ch, reason: 'field-missing', file: loc.file });
+      continue;
+    }
+
+    // Three storage shapes have to be read differently:
+    //   scalar                "AbilityCooldown"  "16 15"
+    //   ability value object  { value: "16 15", special_bonus_x: "+2" }
+    //   talent modifier       the special_bonus_x key itself
+    let current;
+    if (loc.modifier) {
+      const talentValue =
+        entry && typeof entry === 'object' && !Array.isArray(entry)
+          ? entry[loc.modifier]
+          : undefined;
+      if (talentValue === undefined) {
+        dropped.push({ ...ch, reason: 'field-missing', file: loc.file });
+        continue;
+      }
+      current = String(talentValue);
+    } else if (typeof entry === 'string') {
+      current = entry;
+    } else if (entry && typeof entry === 'object' && entry.value !== undefined) {
+      current = String(entry.value);
+    } else {
+      current = String(entry);
+    }
+
+    // `oldValue` is what the game said when the user made the edit.
+    if (String(ch.oldValue) === String(current)) {
+      kept.push(ch);
+      unchanged.push(ch.field);
+    } else {
+      dropped.push({
+        ...ch,
+        reason: 'game-changed',
+        gameNow: current,
+        wasAtEdit: ch.oldValue,
+        file: loc.file,
+      });
+    }
+  }
+
+  return { kept, dropped, unchanged };
+}
+
 module.exports = {
   apply,
   revert,
   status,
+  reconcile,
+  locate,
   groupChanges,
   setFieldInBlock,
   setAbilityValueInBlock,
+  setTalentModifierInBlock,
   findBlockOffset,
   matchingBrace,
 };

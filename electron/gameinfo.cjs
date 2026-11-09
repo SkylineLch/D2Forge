@@ -172,8 +172,35 @@ function insertSearchPath(text, folderName) {
 /** Restore the pristine gameinfo.gi from backup. */
 function revert(gamePath, dataDir) {
   const bk = backupPath(dataDir);
-  if (!fs.existsSync(bk)) return { changed: false };
+  if (!fs.existsSync(bk)) return { changed: false, reason: 'no-backup' };
   fs.copyFileSync(bk, gameinfoPath(gamePath));
+  return { changed: true };
+}
+
+/**
+ * Strip the `Game <folder>` line and the CRC-compensation comment without a
+ * backup, for when the .orig file was lost (user cleaned the game folder,
+ * Steam verified files, app reinstalled). The result is byte-identical to what
+ * the line insertion produced minus our own additions, so the engine sees a
+ * normal, unmodified file.
+ *
+ * @returns {{changed: boolean, reason?: string}}
+ */
+function deactivate(gamePath, folderName = '0test') {
+  const giPath = gameinfoPath(gamePath);
+  if (!fs.existsSync(giPath)) return { changed: false, reason: 'no-gameinfo' };
+
+  const text = fs.readFileSync(giPath, 'utf8');
+  if (!isActive(gamePath, folderName)) return { changed: false, reason: 'not-active' };
+
+  // Drop the line we inserted, plus the `//    ` CRC padding we appended.
+  let next = text.replace(
+    new RegExp(`^[ \\t]*${GAME_KEY}[ \\t]+${folderName}[ \\t]*(\\r?\\n)`, 'm'),
+    ''
+  );
+  next = next.replace(/\/\/ {4}$/, '');
+
+  fs.writeFileSync(giPath, Buffer.from(next, 'utf8'));
   return { changed: true };
 }
 
@@ -183,6 +210,7 @@ module.exports = {
   isActive,
   activate,
   revert,
+  deactivate,
   gameinfoPath,
   backupPath,
 };

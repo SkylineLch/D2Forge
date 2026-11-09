@@ -1,0 +1,36 @@
+{
+  "name": "d2forge",
+  "productName": "D2Forge",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Dota 2 offline-mode numeric editor",
+  "main": "electron/main.cjs",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "start": "node scripts/launch.cjs",
+    "app": "concurrently -k \"vite\" \"wait-on tcp:5173 && node scripts/launch.cjs --dev\"",
+    "preview": "npm run build && npm start",
+    "dist": "vite build && electron-builder"
+  },
+  "build": {
+    "appId": "com.d2forge.app",
+    "productName": "D2Forge",
+    "directories": { "output": "release" },
+    "files": ["dist/**/*", "electron/**/*", "package.json"],
+    "win": { "target": ["nsis", "portable"] },
+    "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true }
+  },
+  "devDependencies": {
+    "@electron/remote": "^2.1.4",
+    "@vitejs/plugin-react": "^6.2.1",
+    "concurrently": "^9.1.2",
+    "electron": "^45.2.3",
+    "electron-builder": "^26.18.0",
+    "react": "^19.3.1",
+    "react-dom": "^19.3.1",
+    "vite": "^8.3.6",
+    "wait-on": "^8.0.1"
+  }
+}

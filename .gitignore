@@ -1,0 +1,44 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+release/
+build.log
+
+# Local runtime data (game cache, extracted VPK files, user's local game path)
+data/
+
+# Unpacked game files — multi-gigabyte Valve archives, never commit
+dota_schinese/
+
+# Reference upstream project used for research (separate git repo)
+ref/
+
+# Third-party binaries and archives used during reverse engineering.
+# Re-download them if you need to repeat the analysis.
+tools/vrf/
+tools/vrf-cli.zip
+tools/icon_test/
+tools/*.pdb
+
+# Bulk text dumps pulled out of the game's VPK during investigation.
+# These are Valve's data, not ours to redistribute.
+tools/ab.txt
+tools/ab_cn.txt
+tools/items.txt
+tools/hero_antimage.txt
+tools/testdata_*.txt
+tools/*_schinese.txt
+
+# Throwaway scripts from the reverse-engineering phase (numbered scratch files).
+# The named probe-*.mjs files are the ones worth keeping.
+tools/probe[0-9]*.mjs
+tools/mkdir_test.js
+
+# Editor / OS noise
+.vscode/
+.idea/
+Thumbs.db
+desktop.ini
+*.log

@@ -6,6 +6,8 @@ A modern desktop editor for Dota 2's offline-mode numbers — hero stats, abilit
 
 ![英雄列表](docs/screenshots/01-hero-list.png)
 
+**[下载最新版](https://github.com/SkylineLch/D2Forge/releases/latest)** · [从源码运行](#从源码运行) · [使用流程](#使用流程)
+
 ---
 
 ## 目录
@@ -100,23 +102,23 @@ D2Forge 把这套流程收进一个图形界面：
 
 ## 下载与安装
 
-本仓库不附带二进制（安装包体积超过 GitHub 的单文件限制）。两种获取方式：
+**[➜ 下载最新版](https://github.com/SkylineLch/D2Forge/releases/latest)**
 
-**A. 自己打包**（推荐，也不需要信任第三方二进制）
+| 文件 | 大小 | 说明 |
+|---|---|---|
+| `D2Forge.1.0.0.exe` | 105 MB | **免安装版** —— 单个文件，双击即用。想随手带着走选这个。 |
+| `D2Forge.Setup.1.0.0.exe` | 116 MB | **安装版**（NSIS）—— 可选安装目录，有开始菜单项。长期使用选这个。 |
+
+两个都是独立包，不需要另装 Node.js。文件名里的点来自 GitHub 对发布资产的命名规则（空格会被替换成点号），下载后可以随意改名，不影响使用。
+
+**自己打包**（也不想信任别人编译的二进制时）：
 
 ```bash
 npm install
 npm run dist
 ```
 
-产物在 `release/`：
-
-- `release/win-unpacked/D2Forge.exe` —— 免安装，整个文件夹拷走即可运行（约 350 MB）
-- `release/D2Forge Setup 1.0.0.exe` —— NSIS 安装包，可选择安装目录
-
-**B. 从 Releases 下载**
-
-如果仓库右侧的 Releases 里有构建产物，直接下载安装包或免安装压缩包。没有的话用方式 A。
+产物在 `release/`：`win-unpacked/D2Forge.exe`（免安装，整个文件夹约 350 MB）与 `D2Forge Setup 1.0.0.exe`。
 
 ## 从源码运行
 

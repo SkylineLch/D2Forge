@@ -191,9 +191,9 @@ function writeVpk(outputPath, files) {
   header.writeUInt32LE(2, 4);
   header.writeUInt32LE(treeLen, 8);
   header.writeUInt32LE(dataBuf.length, 12);
-  header.writeUInt32LE(0, 16); // chunk hash count
-  header.writeUInt32LE(0, 20);
-  header.writeUInt32LE(0, 24);
+  header.writeUInt32LE(0, 16);  // archive MD5 section (unused)
+  header.writeUInt32LE(48, 20); // other MD5 section: treeHash + chunkHash + signature
+  header.writeUInt32LE(0, 24);  // signature section
 
   const body = Buffer.concat([header, treeBuf, dataBuf]);
   const treeHash = crypto.createHash('md5').update(treeBuf).digest();

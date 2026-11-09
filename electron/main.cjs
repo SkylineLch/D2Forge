@@ -29,9 +29,45 @@ const dataStore = require('./data-store.cjs');
 const labels = require('./labels.cjs');
 const { createChangeStore } = require('./change-store.cjs');
 const exporter = require('./exporter.cjs');
+const { isDotaRunning } = require('./game-process.cjs');
 
 let mainWindow;
 const isDev = process.env.NODE_ENV === 'development';
+
+/* --------------------------- single instance ----------------------------- */
+//
+// Two copies of the editor would fight over the same changes.json and the same
+// override VPK — the second one to save silently wins, and the first one's
+// edits vanish on reload. Refuse the second launch and bring the existing
+// window forward instead.
+//
+// `--ui-check` is exempt: the smoke test runs headless, may be invoked while a
+// normal instance is open, and always exits on its own.
+
+const isUiCheck = process.argv.includes('--ui-check');
+
+/** Set when a different instance already owns the lock. */
+let blockedByExistingInstance = false;
+
+if (!isUiCheck) {
+  const gotLock = app.requestSingleInstanceLock();
+
+  if (!gotLock) {
+    // Another instance owns the lock. It will receive 'second-instance' and
+    // surface itself; we just leave without ever creating a window.
+    blockedByExistingInstance = true;
+    app.quit();
+  } else {
+    app.on('second-instance', () => {
+      if (!mainWindow) return;
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.show();
+      mainWindow.focus();
+      mainWindow.flashFrame(true);
+      mainWindow.webContents.send('second-instance');
+    });
+  }
+}
 
 function createWindow() {
   mainWindow = new BrowserWindow({
@@ -73,7 +109,30 @@ function createWindow() {
   });
 }
 
-app.whenReady().then(createWindow);
+app.whenReady().then(() => {
+  if (blockedByExistingInstance) {
+    // The existing instance has already been focused via 'second-instance'.
+    // Show a short explanation, then leave.
+    //
+    // `D2FORGE_NO_DIALOG` exists so automated checks can exercise the guard:
+    // a modal would block the harness forever with nobody to click it.
+    if (process.env.D2FORGE_NO_DIALOG === '1') {
+      console.log('[main] another instance is already running; exiting');
+    } else {
+      dialog.showMessageBoxSync({
+        type: 'info',
+        title: 'D2Forge 已在运行',
+        message: 'D2Forge 已有一个实例在运行',
+        detail: '同一时间只能打开一个 D2Forge。已为你切换到正在运行的那个窗口。',
+        buttons: ['好'],
+        noLink: true,
+      });
+    }
+    app.quit();
+    return;
+  }
+  createWindow();
+});
 
 /* ------------------------------- ui check -------------------------------- */
 
@@ -690,10 +749,25 @@ ipcMain.handle('get-changes', async () => {
   return { ok: true, changes: store.all() };
 });
 
+/**
+ * Record one edited field and persist immediately.
+ *
+ * The save used to be omitted here, so edits only ever lived in memory: the
+ * file was rewritten by reset/remove/reload only, meaning a user who just
+ * tweaked values and closed the app lost everything. Writing on every change
+ * is a few hundred bytes of JSON, so the simplicity is worth more than a
+ * debounce.
+ */
 ipcMain.handle('set-change', async (_, change) => {
-  const store = ensureStore();
-  store.set(change);
-  return { ok: true, count: store.count() };
+  try {
+    const store = ensureStore();
+    store.set(change);
+    store.save(currentGamePath);
+    return { ok: true, count: store.count() };
+  } catch (err) {
+    console.error('[main] set-change failed:', err);
+    return { ok: false, error: err.message };
+  }
 });
 
 ipcMain.handle('clear-change', async (_, key) => {
@@ -757,12 +831,65 @@ ipcMain.handle('reload-game', async () => {
 
 /* --------------------------------- export -------------------------------- */
 
+/**
+ * Write the saved edits into the override VPK and mount it.
+ *
+ * `apply()` can legitimately return an empty file list — nothing matched, or
+ * there were no changes at all. That used to be wrapped in `ok: true`, so the
+ * UI said "Exported. Restart Dota 2" while the game kept its vanilla numbers.
+ * Treat an empty result as a failure and pass the reason through.
+ *
+ * Dota 2 holds the pak files open and resolves its mount table at launch, so
+ * exporting while it runs either fails on a locked file or gets ignored. We
+ * check first and refuse with an actionable message instead of half-writing.
+ */
 ipcMain.handle('export-mod', async () => {
   try {
     if (!currentGamePath) throw new Error('No game folder selected');
     const store = ensureStore();
+
+    // Persist first: the export must reflect what's on disk, not just memory.
+    store.save(currentGamePath);
+
+    if (!store.count()) {
+      return { ok: false, error: '没有任何修改可导出', detail: 'No changes' };
+    }
+
+    const running = await isDotaRunning();
+    if (running.running && !isUiCheck) {
+      return {
+        ok: false,
+        error: 'Dota 2 正在运行，无法导出。请完全退出游戏后再试。',
+        errorEn: 'Dota 2 is running. Close the game completely, then export again.',
+        code: 'GAME_RUNNING',
+      };
+    }
+
     const result = await exporter.apply(currentGamePath, store.all());
-    return { ok: true, ...result };
+
+    if (!result.files?.length) {
+      console.warn('[main] export produced no files:', result.note);
+      return {
+        ok: false,
+        error: result.note === 'No changes to export'
+          ? '没有任何修改可导出'
+          : '导出失败：没有字段被写入游戏数据（可能是游戏版本更新导致字段路径变化）',
+        detail: result.note,
+        skipped: result.skipped || [],
+      };
+    }
+
+    // Partial success is still worth surfacing — some edits silently did not
+    // land because the block or field no longer exists.
+    if (result.skipped?.length) {
+      console.warn(`[main] export skipped ${result.skipped.length} field(s)`);
+    }
+
+    return {
+      ok: true,
+      ...result,
+      partial: result.skipped?.length > 0,
+    };
   } catch (err) {
     console.error('[main] export-mod failed:', err);
     return { ok: false, error: err.message };
@@ -772,10 +899,33 @@ ipcMain.handle('export-mod', async () => {
 ipcMain.handle('revert-mod', async () => {
   try {
     if (!currentGamePath) throw new Error('No game folder selected');
+
+    // Same reason as export: restoring gameinfo.gi while the game is live is
+    // either blocked by a lock or silently ineffective.
+    const running = await isDotaRunning();
+    if (running.running && !isUiCheck) {
+      return {
+        ok: false,
+        error: 'Dota 2 正在运行，无法恢复原版。请完全退出游戏后再试。',
+        errorEn: 'Dota 2 is running. Close the game completely, then try again.',
+        code: 'GAME_RUNNING',
+      };
+    }
+
     const result = exporter.revert(currentGamePath);
     return { ok: true, ...result };
   } catch (err) {
     return { ok: false, error: err.message };
+  }
+});
+
+/** Lets the UI warn before the user even reaches for the export button. */
+ipcMain.handle('check-game-running', async () => {
+  try {
+    const r = await isDotaRunning();
+    return { ok: true, running: r.running, pids: r.pids };
+  } catch (err) {
+    return { ok: true, running: false, pids: [], detail: err.message };
   }
 });
 

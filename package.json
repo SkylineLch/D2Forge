@@ -1,7 +1,7 @@
 {
   "name": "d2forge",
   "productName": "D2Forge",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "private": true,
   "description": "Dota 2 offline-mode numeric editor",
   "main": "electron/main.cjs",

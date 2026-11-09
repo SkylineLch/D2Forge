@@ -6,7 +6,7 @@
 //   2. For each, re-read the original text from the game VPK and apply the
 //      values by targeted text replacement (never re-serialize the whole tree,
 //      which would destroy comments and formatting).
-//   3. Write only those files into <game>/dota/0test/pak01_dir.vpk.
+//   3. Write only those files into <game>/0test/pak01_dir.vpk.
 //   4. Insert `Game 0test` into gameinfo.gi so the engine mounts the override.
 
 const fs = require('fs');
@@ -17,6 +17,50 @@ const gameinfo = require('./gameinfo.cjs');
 
 const OVERRIDE_DIR = '0test';
 const OVERRIDE_PACK = 'pak01_dir.vpk';
+
+/**
+ * Where the override archive goes.
+ *
+ * `SearchPaths` entries resolve against the GAME ROOT (`...\dota 2 beta\game`),
+ * not against `dota/` — you can see that from the shipped `Game dota` line,
+ * which points at `game/dota`. So `Game 0test` means `game/0test`.
+ *
+ * This used to be `<game>/dota/0test`, i.e. one level too deep. The engine
+ * looked in `game/0test`, found nothing, and quietly fell back to the stock
+ * pak01 — the export reported success (the VPK really had been written) while
+ * the game showed vanilla numbers. Keep both helpers below so the path is
+ * derived in exactly one place.
+ */
+function overrideDirFor(gamePath) {
+  return path.join(gamePath, OVERRIDE_DIR);
+}
+
+function overrideVpkFor(gamePath) {
+  return path.join(gamePath, OVERRIDE_DIR, OVERRIDE_PACK);
+}
+
+/**
+ * Delete an override written by an older build at the wrong depth.
+ *
+ * Harmless if absent. Only removes the folder when it holds nothing but our
+ * own archive, so it can never eat anything the user put there.
+ */
+function removeLegacyOverride(gamePath) {
+  const legacyDir = path.join(gamePath, 'dota', OVERRIDE_DIR);
+  const legacyVpk = path.join(legacyDir, OVERRIDE_PACK);
+  try {
+    if (!fs.existsSync(legacyVpk)) return false;
+    fs.unlinkSync(legacyVpk);
+    if (fs.existsSync(legacyDir) && fs.readdirSync(legacyDir).length === 0) {
+      fs.rmdirSync(legacyDir);
+    }
+    console.log(`[export] removed legacy override at wrong depth: ${legacyDir}`);
+    return true;
+  } catch (err) {
+    console.warn('[export] could not remove legacy override:', err.message);
+    return false;
+  }
+}
 
 /**
  * Where the gameinfo.gi backup lives.
@@ -419,16 +463,19 @@ function apply(gamePath, changes) {
     return { files: [], note: 'No changes to export' };
   }
 
-  const vpkPath = path.join(gamePath, 'dota', OVERRIDE_DIR, OVERRIDE_PACK);
+  const vpkPath = overrideVpkFor(gamePath);
   const sourceVpk = openVpk(path.join(gamePath, 'dota', 'pak01_dir.vpk'));
 
   const byFile = groupChanges(changes);
   const output = [];
+  /** Fields that could not be written, so the UI can report a partial export. */
+  const skipped = [];
 
   for (const [relFile, objMap] of byFile) {
     const original = readText(sourceVpk, relFile);
     if (!original) {
       console.warn(`[export] source missing, skipping: ${relFile}`);
+      skipped.push({ file: relFile, reason: 'source-missing' });
       continue;
     }
 
@@ -441,6 +488,7 @@ function apply(gamePath, changes) {
         const offset = findBlockOffset(text, objPath);
         if (offset === -1) {
           console.warn(`[export] block not found: ${relFile} :: ${objPath.join('.')}`);
+          skipped.push({ file: relFile, field: f.field, reason: 'block-not-found' });
           continue;
         }
         const next = kind === 'abilityValue'
@@ -449,7 +497,10 @@ function apply(gamePath, changes) {
             ? setTalentModifierInBlock(text, offset, f.field, f.modifier, f.newValue)
             : setFieldInBlock(text, offset, f.field, f.newValue);
         if (next !== text) { text = next; applied++; }
-        else console.warn(`[export] no change: ${relFile} :: ${objPath.join('.')}.${f.field}`);
+        else {
+          console.warn(`[export] no change: ${relFile} :: ${objPath.join('.')}.${f.field}`);
+          skipped.push({ file: relFile, field: f.field, reason: 'field-not-found' });
+        }
       }
     }
 
@@ -459,15 +510,20 @@ function apply(gamePath, changes) {
   }
 
   if (!output.length) {
-    return { files: [], note: 'No matching fields found in source data' };
+    return { files: [], skipped, note: 'No matching fields found in source data' };
   }
 
   writeVpk(vpkPath, output);
+
+  // Clear out an override left behind at the old, wrong depth so the engine
+  // can't pick up two copies of the same files.
+  removeLegacyOverride(gamePath);
 
   const gi = gameinfo.activate(gamePath, backupDirFor(gamePath), OVERRIDE_DIR) || {};
 
   return {
     files: output.map((o) => o.rel),
+    skipped,
     vpk: vpkPath,
     gameinfo: gi,
   };
@@ -475,8 +531,8 @@ function apply(gamePath, changes) {
 
 /** Remove the override VPK and restore gameinfo.gi. */
 function revert(gamePath) {
-  const dir = path.join(gamePath, 'dota', OVERRIDE_DIR);
-  const vpkPath = path.join(dir, OVERRIDE_PACK);
+  const dir = overrideDirFor(gamePath);
+  const vpkPath = overrideVpkFor(gamePath);
 
   let removed = false;
   if (fs.existsSync(vpkPath)) {
@@ -486,6 +542,10 @@ function revert(gamePath) {
   try {
     if (fs.existsSync(dir) && fs.readdirSync(dir).length === 0) fs.rmdirSync(dir);
   } catch { /* ignore */ }
+
+  // Also sweep the pre-fix location, otherwise a user upgrading from a build
+  // that wrote to dota/0test would keep a stale override mounted.
+  if (removeLegacyOverride(gamePath)) removed = true;
 
   // Restore from the backup taken at activate time. Both sides now derive the
   // directory from the game path, so a packaged build can't miss it.
@@ -501,10 +561,11 @@ function revert(gamePath) {
 }
 
 function status(gamePath) {
-  const vpkPath = path.join(gamePath, 'dota', OVERRIDE_DIR, OVERRIDE_PACK);
+  const vpkPath = overrideVpkFor(gamePath);
   return {
     active: gameinfo.isActive(gamePath, OVERRIDE_DIR),
     vpkExists: fs.existsSync(vpkPath),
+    vpkPath,
   };
 }
 

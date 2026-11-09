@@ -109,6 +109,13 @@ button.primary:hover:not(:disabled) {
   border: 1px solid var(--border-color);
 }
 
+/* Dota 2 holds its pak files open, so exporting is blocked while it runs. */
+.mod-pill.running {
+  background: rgba(210, 153, 34, 0.18);
+  color: #d29922;
+  border: 1px solid rgba(210, 153, 34, 0.4);
+}
+
 /* -------------------------------- banner --------------------------------- */
 
 .banner {

@@ -3,6 +3,11 @@ import './App.css';
 
 const { ipcRenderer } = window.require('electron');
 
+// The smoke test drives the export button regardless of whether Dota 2 happens
+// to be running on the build machine, so the game-running guard is relaxed for
+// it. Mirrors the `isUiCheck` flag in the main process.
+const IS_UI_CHECK = (window.require('process').argv || []).includes('--ui-check');
+
 /* ------------------------------- helpers ------------------------------- */
 
 /** Case-insensitive substring match across every name a row carries. */
@@ -43,6 +48,11 @@ function App() {
   const [busy, setBusy] = useState(null); // string | null, drives the overlay
   const [banner, setBanner] = useState(null); // { kind, text }
 
+  // Whether Dota 2 is currently running. Writing the override while the game
+  // holds the pak files open fails or gets ignored, so the export button is
+  // disabled and the reason is shown up front instead of after a failed click.
+  const [gameRunning, setGameRunning] = useState(false);
+
   // Which accordions are open. Keys look like `abilities` / `talents` /
   // `abilities:<id>`. Abilities start closed so a hero with 20 abilities is
   // still scannable.
@@ -61,6 +71,39 @@ function App() {
     });
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // Poll for the game process. `tasklist` is cheap, but 3s is often enough to
+  // catch the user alt-tabbing out of Dota and back into the editor.
+  useEffect(() => {
+    let alive = true;
+    const tick = async () => {
+      const res = await ipcRenderer.invoke('check-game-running');
+      if (alive && res?.ok) setGameRunning(!!res.running);
+    };
+    tick();
+    const id = setInterval(tick, 3000);
+    window.addEventListener('focus', tick);
+    return () => {
+      alive = false;
+      clearInterval(id);
+      window.removeEventListener('focus', tick);
+    };
+  }, []);
+
+  // A second launch was refused; the main process already focused this window.
+  useEffect(() => {
+    const onSecond = () => {
+      setBanner({
+        kind: 'warn',
+        text: t(
+          'D2Forge 已有一个实例在运行，同一时间只能打开一个。',
+          'D2Forge is already running — only one instance can be open at a time.'
+        ),
+      });
+    };
+    ipcRenderer.on('second-instance', onSecond);
+    return () => ipcRenderer.removeListener('second-instance', onSecond);
+  }, [t]);
 
   const refreshChanges = async () => {
     const res = await ipcRenderer.invoke('get-changes');
@@ -189,8 +232,24 @@ function App() {
     const next = {
       category, id: selectedId, field, oldValue, newValue, timestamp: Date.now(),
     };
-    ipcRenderer.invoke('set-change', next);
+
+    // Optimistic: the UI updates now, and a write failure rolls it back so the
+    // screen never claims a value is saved when the disk disagrees.
+    const previous = changes;
     setChanges(new Map(changes).set(key, next));
+
+    ipcRenderer.invoke('set-change', next).then((res) => {
+      if (!res?.ok) {
+        setChanges(previous);
+        setBanner({
+          kind: 'err',
+          text: t('保存修改失败：', 'Could not save edit: ') + (res?.error || '未知错误'),
+        });
+      }
+    }).catch((err) => {
+      setChanges(previous);
+      setBanner({ kind: 'err', text: t('保存修改失败：', 'Could not save edit: ') + err.message });
+    });
   };
 
   /** Drop one field back to the game's value. */
@@ -226,9 +285,36 @@ function App() {
     }
   };
 
+  /**
+   * Refuse a file-writing action while Dota 2 is live.
+   *
+   * Returns the translated banner text when the action must be blocked, or
+   * null when it may proceed. The poll still runs in the background; this is
+   * the authoritative check right before the write.
+   */
+  const blockedByRunningGame = async (zhMsg, enMsg) => {
+    if (IS_UI_CHECK) return null;
+    const res = await ipcRenderer.invoke('check-game-running');
+    if (res?.ok && res.running) {
+      setGameRunning(true);
+      return t(zhMsg, enMsg);
+    }
+    return null;
+  };
+
   /** 一键恢复原版 — unmount the override VPK and restore gameinfo.gi. */
   const handleRevertMod = async () => {
     if (!gamePath) return;
+
+    const blocked = await blockedByRunningGame(
+      'Dota 2 正在运行，无法恢复原版。请完全退出游戏后再试。',
+      'Dota 2 is running. Close the game completely, then try again.'
+    );
+    if (blocked) {
+      setBanner({ kind: 'err', text: blocked });
+      return;
+    }
+
     if (!confirm(t(
       '将卸载 0test 覆盖并还原 gameinfo.gi，游戏回到纯原版状态。\n保存的数值修改会保留，可随时再次导出。继续？',
       'This unmounts the 0test override and restores gameinfo.gi, returning the game to vanilla.\nYour saved edits stay in the editor and can be re-exported. Continue?'
@@ -241,6 +327,7 @@ function App() {
         setBanner({ kind: 'ok', text: t('已恢复原版，重启 Dota2 生效', 'Vanilla restored. Restart Dota 2.') });
         await refreshModState();
       } else {
+        if (res.code === 'GAME_RUNNING') setGameRunning(true);
         setBanner({ kind: 'err', text: t('恢复失败：', 'Revert failed: ') + res.error });
       }
     } finally {
@@ -251,14 +338,48 @@ function App() {
   /** 重新导出 — rebuild the override VPK from the saved edits. */
   const handleExport = async () => {
     if (!changes.size) return;
+
+    // Check once more right before acting: the poll runs every few seconds, so
+    // the user may have launched the game in between.
+    const blocked = await blockedByRunningGame(
+      'Dota 2 正在运行，无法导出。请完全退出游戏后再试。',
+      'Dota 2 is running. Close the game completely, then export again.'
+    );
+    if (blocked) {
+      setBanner({ kind: 'err', text: blocked });
+      return;
+    }
+
     setBusy(t('正在导出…', 'Exporting…'));
     try {
       const res = await ipcRenderer.invoke('export-mod');
-      if (res.ok) {
-        setBanner({ kind: 'ok', text: t('已导出，重启 Dota2 生效', 'Exported. Restart Dota 2.') });
-        await refreshModState();
-      } else {
+      if (!res.ok) {
+        if (res.code === 'GAME_RUNNING') setGameRunning(true);
         setBanner({ kind: 'err', text: t('导出失败：', 'Export failed: ') + res.error });
+        return;
+      }
+
+      await refreshModState();
+
+      // A partial export means some edits silently failed to locate their
+      // field — most often after a game patch moved things around.
+      if (res.partial) {
+        const n = res.skipped?.length ?? 0;
+        setBanner({
+          kind: 'warn',
+          text: t(
+            `已导出 ${res.files.length} 个文件，但有 ${n} 项字段未写入（游戏更新可能导致）。重启 Dota2 后请核对数值。`,
+            `Exported ${res.files.length} file(s), but ${n} field(s) did not apply (likely a game update). Verify after restarting Dota 2.`
+          ),
+        });
+      } else {
+        setBanner({
+          kind: 'ok',
+          text: t(
+            `已导出 ${res.files.length} 个文件，重启 Dota2 生效`,
+            `Exported ${res.files.length} file(s). Restart Dota 2.`
+          ),
+        });
       }
     } finally {
       setBusy(null);
@@ -355,6 +476,11 @@ function App() {
               {modState.isActive ? t('覆盖已启用', 'Override active') : t('原版状态', 'Vanilla')}
             </span>
           )}
+          {gameRunning && (
+            <span className="mod-pill running" title={t('导出前请完全退出游戏', 'Close the game before exporting')}>
+              {t('游戏运行中', 'Game running')}
+            </span>
+          )}
         </div>
 
         <div className="toolbar-right">
@@ -376,10 +502,23 @@ function App() {
           <button onClick={handleResetChanges} disabled={!changes.size || !!busy} title={t('清除所有数值修改', 'Discard all edits')}>
             {t('一键还原', 'Reset Edits')}
           </button>
-          <button onClick={handleRevertMod} disabled={!gamePath || !!busy} title={t('卸载覆盖，回到原版', 'Unmount override, back to vanilla')}>
+          <button
+            onClick={handleRevertMod}
+            disabled={!gamePath || !!busy || (gameRunning && !IS_UI_CHECK)}
+            title={gameRunning && !IS_UI_CHECK
+              ? t('游戏运行中，请先退出游戏', 'Close Dota 2 first')
+              : t('卸载覆盖，回到原版', 'Unmount override, back to vanilla')}
+          >
             {t('恢复原版', 'Restore Vanilla')}
           </button>
-          <button className="primary" onClick={handleExport} disabled={!gamePath || !changes.size || !!busy}>
+          <button
+            className="primary"
+            onClick={handleExport}
+            disabled={!gamePath || !changes.size || !!busy || (gameRunning && !IS_UI_CHECK)}
+            title={gameRunning && !IS_UI_CHECK
+              ? t('游戏运行中，请先完全退出游戏', 'Close Dota 2 completely first')
+              : t('把修改写入游戏', 'Write your edits into the game')}
+          >
             {t('导出', 'Export')} {changes.size > 0 && `(${changes.size})`}
           </button>
         </div>

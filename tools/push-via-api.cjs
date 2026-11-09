@@ -1,14 +1,20 @@
 'use strict';
-// Push local commits to GitHub via the REST "Git Data" API.
+// Push local commits to GitHub via the REST "Git Data" API — fallback only.
 //
-// `github.com:443` is unreachable from this machine (the egress proxy answers
-// 502 on CONNECT), so `git push` cannot work. `api.github.com` *is* reachable,
-// and the Git Data API exposes the same primitives git itself uses over the
-// wire: blobs -> trees -> commits -> ref update. This replays local history
-// commit by commit so the remote ends up with the same commits and messages.
+// Prefer plain `git push`. It works once `gh auth setup-git` has installed the
+// credential helper, but only while the proxy environment is cleared:
+//
+//   env -u http_proxy -u https_proxy -u HTTP_PROXY -u HTTPS_PROXY -u ALL_PROXY \
+//     GH_TOKEN=<token> git push origin main
+//
+// The proxy in this environment 502s on CONNECT to github.com and, worse,
+// sometimes answers api.github.com with a certificate for an unrelated host.
+// When neither route works, this script still can: the Git Data API exposes
+// the same primitives git uses over the wire (blobs -> trees -> commits ->
+// ref), and it replays local history commit by commit so the remote ends up
+// with the same commits and messages.
 
 const { execFileSync } = require('child_process');
-
 const https = require('https');
 
 const OWNER = 'SkylineLch';

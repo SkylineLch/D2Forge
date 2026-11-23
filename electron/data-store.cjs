@@ -15,6 +15,7 @@ let vpk = null;
 let loc = null;
 let heroOrder = null;
 let globalAbilityCache = null;
+let itemGroupCache = null;
 
 /* ------------------------------ bootstrap ----------------------------- */
 
@@ -24,6 +25,7 @@ function init(gamePath) {
   loc = createLocalizationLookup((relPath) => readText(vpk, relPath));
   heroOrder = null;
   globalAbilityCache = null; // re-read after a game update
+  itemGroupCache = null;
   console.log(`[data-store] VPK indexed: ${vpk.entries.size} entries`);
   return { entries: vpk.entries.size, version: vpk.version };
 }
@@ -96,6 +98,13 @@ function getHeroOrder() {
   return ids;
 }
 
+const HERO_ATTR_MAP = {
+  DOTA_ATTRIBUTE_STRENGTH: 'str',
+  DOTA_ATTRIBUTE_AGILITY: 'agi',
+  DOTA_ATTRIBUTE_INTELLECT: 'int',
+  DOTA_ATTRIBUTE_ALL: 'all',
+};
+
 function loadHero(heroId) {
   const text = readText(vpk, `scripts/npc/heroes/${heroId}.txt`);
   if (!text) return null;
@@ -104,7 +113,8 @@ function loadHero(heroId) {
   const data = root.DOTAHeroes?.[heroId];
   if (!data) return null;
 
-  return { id: heroId, ...heroNames(heroId), data };
+  const attr = HERO_ATTR_MAP[data.AttributePrimary] || 'other';
+  return { id: heroId, attr, ...heroNames(heroId), data };
 }
 
 /**
@@ -372,6 +382,82 @@ function loadHeroAbilities(heroId) {
 
 /* --------------------------------- items ------------------------------ */
 
+const BASIC_SHOP_SECTIONS = new Set([
+  'consumables', 'attributes', 'weapons_armor', 'misc', 'secretshop',
+]);
+const UPGRADE_SHOP_SECTIONS = new Set([
+  'basics', 'support', 'magics', 'defense', 'weapons', 'artifacts',
+]);
+
+/**
+ * Derive item groups from scripts/shops.txt and scripts/npc/neutral_items.txt.
+ * shops.txt repeats `"item"` keys inside each section, so we scan section
+ * blocks directly instead of relying on parseKV's last-key-wins map.
+ */
+function getItemGroups() {
+  if (itemGroupCache) return itemGroupCache;
+
+  const basicSet = new Set();
+  const upgradeSet = new Set();
+  const neutralMap = new Map();     // id -> tier
+  const enhancementMap = new Map(); // id -> tier
+
+  const shopsText = readText(vpk, 'scripts/shops.txt');
+  if (shopsText) {
+    const secRe = /"([a-zA-Z0-9_]+)"\s*\{([^}]*)\}/g;
+    let sm;
+    while ((sm = secRe.exec(shopsText)) !== null) {
+      const sec = sm[1];
+      const body = sm[2];
+      const target = UPGRADE_SHOP_SECTIONS.has(sec)
+        ? upgradeSet
+        : BASIC_SHOP_SECTIONS.has(sec)
+          ? basicSet
+          : null;
+      if (!target) continue;
+
+      const itemRe = /"item"\s+"(item_[^"]+)"/g;
+      let im;
+      while ((im = itemRe.exec(body)) !== null) target.add(im[1]);
+    }
+  }
+
+  const neutralText = readText(vpk, 'scripts/npc/neutral_items.txt');
+  if (neutralText) {
+    const tiers = parseKV(neutralText).root.neutral_items?.neutral_tiers || {};
+    for (const [tierKey, tierData] of Object.entries(tiers)) {
+      const tier = Number(tierKey) || null;
+      for (const pool of Object.values(tierData?.item_pools || {})) {
+        for (const id of Object.keys(pool?.items || {})) {
+          if (!neutralMap.has(id)) neutralMap.set(id, tier);
+        }
+      }
+      for (const group of Object.values(tierData?.enhancements || {})) {
+        if (!group || typeof group !== 'object') continue;
+        for (const id of Object.keys(group)) {
+          if (!enhancementMap.has(id)) enhancementMap.set(id, tier);
+        }
+      }
+    }
+  }
+
+  itemGroupCache = { basicSet, upgradeSet, neutralMap, enhancementMap };
+  return itemGroupCache;
+}
+
+function classifyItem(id, groups) {
+  if (groups.neutralMap.has(id)) {
+    return { group: 'neutral', neutralTier: groups.neutralMap.get(id) };
+  }
+  if (groups.enhancementMap.has(id)) {
+    return { group: 'enhancement', neutralTier: groups.enhancementMap.get(id) };
+  }
+  if (groups.upgradeSet.has(id)) return { group: 'upgrade', neutralTier: null };
+  if (groups.basicSet.has(id)) return { group: 'basic', neutralTier: null };
+  if (id.startsWith('item_recipe_')) return { group: 'recipe', neutralTier: null };
+  return { group: 'other', neutralTier: null };
+}
+
 function loadItems() {
   if (!vpk) throw new Error('data-store not initialized');
   loc.warm(['zh', 'en']);
@@ -379,13 +465,15 @@ function loadItems() {
   const text = readText(vpk, 'scripts/npc/items.txt');
   if (!text) return [];
 
+  const groups = getItemGroups();
   const { root } = parseKV(text);
   const items = root.DOTAAbilities || {};
   const list = [];
 
   for (const [id, data] of Object.entries(items)) {
     if (!id.startsWith('item_')) continue;
-    list.push({ id, ...abilityNames(id), data });
+    const texture = data?.AbilityTextureName || null;
+    list.push({ id, texture, ...classifyItem(id, groups), ...abilityNames(id), data });
   }
 
   console.log(`[data-store] ${list.length} items`);

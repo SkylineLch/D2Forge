@@ -1,7 +1,7 @@
 {
   "name": "d2forge",
   "productName": "D2Forge",
-  "version": "1.0.1",
+  "version": "1.1.0",
   "private": true,
   "description": "Dota 2 offline-mode numeric editor",
   "main": "electron/main.cjs",
@@ -19,7 +19,10 @@
     "productName": "D2Forge",
     "directories": { "output": "release" },
     "files": ["dist/**/*", "electron/**/*", "package.json"],
-    "win": { "target": ["nsis", "portable"] },
+    "extraResources": [
+      { "from": "tools/vrf-cli", "to": "vrf-cli" }
+    ],
+    "win": { "target": ["nsis", "zip"] },
     "nsis": { "oneClick": false, "allowToChangeInstallationDirectory": true }
   },
   "devDependencies": {

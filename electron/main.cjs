@@ -21,15 +21,25 @@ if (process.env.ELECTRON_RUN_AS_NODE) {
   return;
 }
 
-const { app, BrowserWindow, ipcMain, dialog } = require('electron');
+const { app, BrowserWindow, ipcMain, dialog, protocol } = require('electron');
 const path = require('path');
 const fs = require('fs');
 
 const dataStore = require('./data-store.cjs');
 const labels = require('./labels.cjs');
+const {
+  descriptionTokens,
+  scepterDescriptionTokens,
+  shardDescriptionTokens,
+} = require('./localization.cjs');
 const { createChangeStore } = require('./change-store.cjs');
 const exporter = require('./exporter.cjs');
 const { isDotaRunning } = require('./game-process.cjs');
+const icons = require('./icons.cjs');
+
+protocol.registerSchemesAsPrivileged([
+  { scheme: 'd2icon', privileges: { standard: true, secure: true, supportFetchAPI: true } },
+]);
 
 let mainWindow;
 const isDev = process.env.NODE_ENV === 'development';
@@ -131,6 +141,20 @@ app.whenReady().then(() => {
     app.quit();
     return;
   }
+  protocol.handle('d2icon', (request) => {
+    try {
+      const u = new URL(request.url);
+      const kind = u.hostname;
+      const name = decodeURIComponent(u.pathname.replace(/^\/+/, ''));
+      const filePath = icons.resolveIconPath(path.join(app.getPath('userData'), 'icons'), kind, name);
+      if (!filePath) return new Response(null, { status: 404 });
+      return new Response(fs.readFileSync(filePath), {
+        headers: { 'content-type': 'image/png', 'cache-control': 'public, max-age=86400' },
+      });
+    } catch {
+      return new Response(null, { status: 404 });
+    }
+  });
   createWindow();
 });
 
@@ -563,6 +587,15 @@ ipcMain.handle('select-directory', async () => {
   return result.canceled ? null : result.filePaths[0];
 });
 
+function triggerIconSync(gamePath) {
+  const cacheDir = path.join(app.getPath('userData'), 'icons');
+  icons.ensureIcons(gamePath, cacheDir).then((res) => {
+    if (res.ok && mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('icons-ready');
+    }
+  });
+}
+
 /** Open the game: index the VPK, prepare the change store. */
 ipcMain.handle('open-game', async (_, rawPath) => {
   try {
@@ -585,6 +618,7 @@ ipcMain.handle('open-game', async (_, rawPath) => {
 
     const store = ensureStore();
     store.load(gamePath);
+    triggerIconSync(gamePath);
 
     return {
       ok: true,
@@ -699,17 +733,52 @@ function buildTalentView(talent, heroId) {
  * `scope` decides the change-key prefix: hero abilities are `abilities`,
  * talents live under `talents` so their edits do not collide.
  */
+function cleanDescription(raw) {
+  if (!raw) return null;
+  return String(raw)
+    .replace(/<br\s*\/?>/gi, '\n')
+    .replace(/<\/?(?:font|h1|h2|span|b|i|strong|em)[^>]*>/gi, '')
+    .replace(/\\n/g, '\n')
+    .replace(/%%/g, '%')
+    .trim() || null;
+}
+
+function lookupDescPair(tokens) {
+  let zh = null;
+  let en = null;
+  for (const tok of tokens) {
+    if (!zh) zh = cleanDescription(dataStore.lookup('zh', tok));
+    if (!en) en = cleanDescription(dataStore.lookup('en', tok));
+  }
+  return { zh, en };
+}
+
 function buildAbilityView(ability, heroId, scope = 'abilities') {
   const data = { ...ability.data, __id: ability.id };
   const scalars = labels.ABILITY_SCALARS
     .filter((f) => data[f.key] !== undefined)
     .map((f) => ({ ...f, value: data[f.key] }));
 
+  const behavior = typeof data.AbilityBehavior === 'string' ? data.AbilityBehavior : '';
+  const isHiddenOrUnlearnable = /DOTA_ABILITY_BEHAVIOR_(HIDDEN|NOT_LEARNABLE)/.test(behavior);
+
+  const desc = lookupDescPair(descriptionTokens(ability.id));
+  const scepter = lookupDescPair(scepterDescriptionTokens(ability.id));
+  const shard = lookupDescPair(shardDescriptionTokens(ability.id));
+
   return {
     id: ability.id,
     scope,
     name_zh: ability.name_zh,
     name_en: ability.name_en,
+    texture: data.AbilityTextureName || null,
+    isHiddenOrUnlearnable,
+    description_zh: desc.zh,
+    description_en: desc.en,
+    scepter_zh: scepter.zh,
+    scepter_en: scepter.en,
+    shard_zh: shard.zh,
+    shard_en: shard.en,
     scalars,
     values: labels.abilityValueRows(data, (lang, token) => dataStore.lookup(lang, token)),
   };
@@ -726,12 +795,16 @@ ipcMain.handle('get-item', async (_, itemId) => {
       .filter((f) => data[f.key] !== undefined)
       .map((f) => ({ ...f, value: data[f.key] }));
 
+    const desc = lookupDescPair(descriptionTokens(item.id));
+
     return {
       ok: true,
       item: {
         id: item.id,
         name_zh: item.name_zh,
         name_en: item.name_en,
+        description_zh: desc.zh,
+        description_en: desc.en,
         scalars,
         values: labels.abilityValueRows(data, (lang, token) => dataStore.lookup(lang, token)),
       },
@@ -814,6 +887,7 @@ ipcMain.handle('reload-game', async () => {
     store.clear();
     for (const ch of result.kept) store.set(ch);
     store.save(currentGamePath);
+    triggerIconSync(currentGamePath);
 
     return {
       ok: true,

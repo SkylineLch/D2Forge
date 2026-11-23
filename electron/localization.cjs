@@ -11,10 +11,12 @@
 
 const FILES = {
   en: {
+    items: 'resource/localization/items_english.txt',
     abilities: 'resource/localization/abilities_english.txt',
     dota: 'resource/localization/dota_english.txt',
   },
   zh: {
+    items: 'resource/localization/items_schinese.txt',
     abilities: 'resource/localization/abilities_schinese.txt',
     dota: 'resource/localization/dota_schinese.txt',
   },
@@ -53,14 +55,14 @@ function createLocalizationLookup(readText, opts = {}) {
     // because we only stop at the closing quote followed by end-of-line.
     const lineRe = /^[ \t]*"([^"\r\n]+)"[ \t]+"((?:[^"\\]|\\.)*)"[ \t]*\r?$/gm;
 
-    for (const kind of ['abilities', 'dota']) {
+    for (const kind of ['abilities', 'items', 'dota']) {
       const text = getText(files[kind]);
       if (!text) continue;
 
       const re = new RegExp(lineRe.source, 'gm');
       let m;
       while ((m = re.exec(text)) !== null) {
-        const key = m[1];
+        const key = m[1].toLowerCase();
         if (map.has(key)) continue; // first file wins
         map.set(key, m[2].replace(/\\"/g, '"'));
       }
@@ -75,9 +77,9 @@ function createLocalizationLookup(readText, opts = {}) {
     const files = FILES[lang];
     if (!files) return null;
 
-    const re = new RegExp(`^[\\t ]*"${escapeRegex(token)}"[\\t ]+"((?:[^"\\\\]|\\\\.)*)"`, 'm');
+    const re = new RegExp(`^[\\t ]*"${escapeRegex(token)}"[\\t ]+"((?:[^"\\\\]|\\\\.)*)"`, 'mi');
 
-    for (const kind of ['abilities', 'dota']) {
+    for (const kind of ['abilities', 'items', 'dota']) {
       const text = getText(files[kind]);
       if (!text) continue;
       const m = text.match(re);
@@ -93,12 +95,13 @@ function createLocalizationLookup(readText, opts = {}) {
    */
   function lookup(lang, token) {
     if (!token) return null;
-    const key = `${lang}:${token}`;
+    const lowerToken = token.toLowerCase();
+    const key = `${lang}:${lowerToken}`;
     if (tokenCache.has(key)) return tokenCache.get(key);
 
     const idx = indexes.get(lang);
     if (idx) {
-      const hit = idx.get(token) ?? null;
+      const hit = idx.get(lowerToken) ?? null;
       tokenCache.set(key, hit);
       return hit;
     }
@@ -114,7 +117,7 @@ function createLocalizationLookup(readText, opts = {}) {
     missCount.set(lang, misses);
     if (misses >= indexThreshold) {
       const built = buildIndex(lang);
-      const indexed = built.get(token) ?? null;
+      const indexed = built.get(lowerToken) ?? null;
       tokenCache.set(key, indexed);
       return indexed;
     }
@@ -135,7 +138,7 @@ function createLocalizationLookup(readText, opts = {}) {
   function lookupMany(lang, tokens) {
     const out = new Map();
     const idx = buildIndex(lang);
-    for (const t of tokens) out.set(t, idx.get(t) ?? null);
+    for (const t of tokens) out.set(t, idx.get(t.toLowerCase()) ?? null);
     return out;
   }
 
@@ -159,7 +162,9 @@ function heroNameToken(heroName) {
  */
 function abilityNameTokens(abilityName) {
   return [
+    `DOTA_Tooltip_Ability_${abilityName}:n`,
     `DOTA_Tooltip_Ability_${abilityName}`,
+    `DOTA_Tooltip_ability_${abilityName}:n`,
     `DOTA_Tooltip_ability_${abilityName}`,
     `DOTA_Tooltip_Facet_${abilityName}`,
   ];
@@ -181,11 +186,29 @@ function descriptionTokens(abilityName) {
   ];
 }
 
+function scepterDescriptionTokens(abilityName) {
+  return [
+    `DOTA_Tooltip_ability_${abilityName}_scepter_description`,
+    `DOTA_Tooltip_Ability_${abilityName}_scepter_description`,
+    `DOTA_Tooltip_ability_${abilityName}_aghanim_description`,
+    `DOTA_Tooltip_Ability_${abilityName}_aghanim_description`,
+  ];
+}
+
+function shardDescriptionTokens(abilityName) {
+  return [
+    `DOTA_Tooltip_ability_${abilityName}_shard_description`,
+    `DOTA_Tooltip_Ability_${abilityName}_shard_description`,
+  ];
+}
+
 module.exports = {
   createLocalizationLookup,
   heroNameToken,
   abilityNameTokens,
   fieldLabelTokens,
   descriptionTokens,
+  scepterDescriptionTokens,
+  shardDescriptionTokens,
   FILES,
 };

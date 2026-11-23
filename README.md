@@ -44,10 +44,19 @@ D2Forge 把这套流程收进一个图形界面：
 
 ## 功能
 
-**结构化浏览**
-- 英雄 → 技能 / 天赋 / 属性三条主线，物品 → 属性。
-- 每个板块是可折叠手风琴，默认只展开技能与天赋，属性、攻击、防御折叠着 —— 不用一路滚轮扫过几十个字段。
+**结构化浏览与图标墙**
+- 英雄按 **力量 / 敏捷 / 智力 / 全才** 四大属性分组；物品读取游戏官方 `shops.txt` 与 `neutral_items.txt`，分为 **基础 / 高级 / 中立（含 T1–T4 级标）/ 附魔 / 其他（已移除与配方）**。
+- 自动从游戏 VPK 增量提取英雄、物品、技能图标并本地缓存；未选中项目时展示分组图标墙，点击即编，同时保留左侧极速搜索列表。
+- 英雄 → 技能 / 天赋 / 属性三条主线，物品 → 属性 / 数值参数。
 - 选中英雄后列表位置保持不变，不会跳回顶部。
+
+**技能描述与参数分层**
+- 展开技能或物品时，顶部直接展示游戏官方描述、神杖与魔晶说明，并高亮 `%变量名%` 方便对照。
+- 自动将「游戏内可见核心词条」与「内部隐藏参数（`raw`）」分层，内部参数收进独立折叠区并保留原始英文字段名。
+
+**一键复制游戏内指令**
+- 物品页一键复制 `-item <id>`，技能栏一键复制 `create_ability <id>`（对 `HIDDEN` / `NOT_LEARNABLE` 衍生技能标注提示）。
+- 顶部工具栏一键复制 `fretbots脚本`（`sv_cheats 1; script_reload_code bots/fretbots`）。
 
 **混合搜索**
 - 一个搜索框同时匹配中文名、英文名、内部原始名：`幻影`、`anti`、`npc_dota_hero_axe` 都能命中。
@@ -61,8 +70,7 @@ D2Forge 把这套流程收进一个图形界面：
 - 工具栏的「导出」按钮常驻显示待写入的改动条数。
 
 **中英双语**
-- 界面可切换；技能名、物品名、数值标签取自游戏自身的本地化表，和你在游戏里看到的一致。
-- 技能数值标签的中文覆盖率 **98%**；剩余 2% 是 `is_global`、`has_multishot` 这类布尔开关，本身不适合编辑。
+- 界面可切换；补全了 `items_schinese.txt`、大小写无关索引与新版 `:n` 词条后缀，现役物品与英雄中文覆盖率达 100%。
 
 **三级可逆**
 | 操作 | 作用范围 | 典型场景 |
@@ -104,12 +112,12 @@ D2Forge 把这套流程收进一个图形界面：
 
 **[➜ 下载最新版](https://github.com/SkylineLch/D2Forge/releases/latest)**
 
-| 文件 | 大小 | 说明 |
-|---|---|---|
-| `D2Forge.1.0.1.exe` | 约 105 MB | **免安装版** —— 单个文件，双击即用。想随手带着走选这个。 |
-| `D2Forge.Setup.1.0.1.exe` | 约 116 MB | **安装版**（NSIS）—— 可选安装目录，有开始菜单项。长期使用选这个。 |
+| 文件 | 说明 |
+|---|---|
+| `D2Forge Setup 1.1.0.exe` | **安装版**（NSIS）—— 可选安装目录，有开始菜单项。长期使用选这个。 |
+| `D2Forge-1.1.0-win.zip` | **免安装压缩包** —— 解压即用（内置图标提取工具 `Source2Viewer-CLI`）。 |
 
-两个都是独立包，不需要另装 Node.js。文件名里的点来自 GitHub 对发布资产的命名规则（空格会被替换成点号），下载后可以随意改名，不影响使用。
+两个都是独立包，不需要另装 Node.js。GitHub Release 页面中的文件名空格会被自动替换为点号，下载后可以随意改名，不影响使用。
 
 **自己打包**（也不想信任别人编译的二进制时）：
 
@@ -118,7 +126,7 @@ npm install
 npm run dist
 ```
 
-产物在 `release/`：`win-unpacked/D2Forge.exe`（免安装，整个文件夹约 350 MB）与 `D2Forge Setup 1.0.1.exe`。
+产物在 `release/`：`win-unpacked/`、`D2Forge-1.1.0-win.zip` 与 `D2Forge Setup 1.1.0.exe`。
 
 ## 从源码运行
 
@@ -194,13 +202,14 @@ Dota 2 打补丁后，`pak01_dir.vpk` 会整体重排，旧的覆盖包里的文
 
 ```
 electron/
-  main.cjs          Electron 主进程、IPC 处理、路径解析与纠正
+  main.cjs          Electron 主进程、IPC 处理、d2icon 协议与路径纠正
   vpk.cjs           VPK 读写（v1 + v2 头、分卷归档）
   kv-parser.cjs     Valve KeyValues（KV1）词法与序列化
-  data-store.cjs    索引 VPK，对外提供英雄 / 物品 / 技能 / 天赋
+  data-store.cjs    索引 VPK，提供英雄属性分组 / 商店与中立物品分组 / 天赋
+  icons.cjs         调用 Source2Viewer-CLI 增量提取与解析本地图标缓存
   exporter.cjs      应用改动、生成覆盖包、比对历史改动
   gameinfo.cjs      gameinfo.gi 注入与 CRC32 补偿
-  localization.cjs  按需查询游戏的本地化 token
+  localization.cjs  大小写无关查询游戏本地化 token（含 items / abilities / dota）
   labels.cjs        字段名 → 中文标签的推断与清洗
   change-store.cjs  跨会话持久化改动历史
 src/                React 界面

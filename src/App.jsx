@@ -44,6 +44,9 @@ function App() {
   const [itemList, setItemList] = useState([]);
 
   const [query, setQuery] = useState('');
+  const [groupFilter, setGroupFilter] = useState('all');
+  const [copiedKey, setCopiedKey] = useState(null);
+  const [iconRev, setIconRev] = useState(0);
   const [modState, setModState] = useState(null); // { isActive, ... }
   const [busy, setBusy] = useState(null); // string | null, drives the overlay
   const [banner, setBanner] = useState(null); // { kind, text }
@@ -104,6 +107,12 @@ function App() {
     ipcRenderer.on('second-instance', onSecond);
     return () => ipcRenderer.removeListener('second-instance', onSecond);
   }, [t]);
+
+  useEffect(() => {
+    const onIconsReady = () => setIconRev((v) => v + 1);
+    ipcRenderer.on('icons-ready', onIconsReady);
+    return () => ipcRenderer.removeListener('icons-ready', onIconsReady);
+  }, []);
 
   const refreshChanges = async () => {
     const res = await ipcRenderer.invoke('get-changes');
@@ -173,9 +182,21 @@ function App() {
     setSelectedId(null);
     setSelectedData(null);
     setQuery('');
+    setGroupFilter('all');
     // Heroes default to abilities+talents open, items only have two sections
     // so both start expanded.
     setOpen(next === 'heroes' ? new Set(['abilities', 'talents']) : new Set(['item-stats', 'item-values']));
+  };
+
+  const copyCommand = async (cmd, key) => {
+    try {
+      await navigator.clipboard.writeText(cmd);
+      setCopiedKey(key);
+      setTimeout(() => setCopiedKey((prev) => (prev === key ? null : prev)), 1500);
+    } catch {
+      // Fallback if clipboard API is unavailable
+      setBanner({ kind: 'info', text: cmd });
+    }
   };
 
   /* ------------------------------ editing ------------------------------ */
@@ -433,10 +454,47 @@ function App() {
 
   const list = category === 'heroes' ? heroList : itemList;
 
-  const filtered = useMemo(
-    () => list.filter((row) => matchesQuery(row, query.trim())),
-    [list, query]
-  );
+  const groupOptions = useMemo(() => {
+    if (category === 'heroes') {
+      return [
+        { id: 'all', zh: '全部', en: 'All' },
+        { id: 'str', zh: '力量', en: 'STR' },
+        { id: 'agi', zh: '敏捷', en: 'AGI' },
+        { id: 'int', zh: '智力', en: 'INT' },
+        { id: 'all_attr', zh: '全才', en: 'UNI' },
+      ];
+    }
+    return [
+      { id: 'all', zh: '全部', en: 'All' },
+      { id: 'basic', zh: '基础', en: 'Basic' },
+      { id: 'upgrade', zh: '高级', en: 'Upgrade' },
+      { id: 'neutral', zh: '中立', en: 'Neutral' },
+      { id: 'enhancement', zh: '附魔', en: 'Enchant' },
+      { id: 'other', zh: '其他', en: 'Other' },
+    ];
+  }, [category]);
+
+  const filtered = useMemo(() => {
+    const q = query.trim();
+    return list.filter((row) => {
+      if (groupFilter !== 'all') {
+        if (category === 'heroes') {
+          const target = groupFilter === 'all_attr' ? 'all' : groupFilter;
+          if (row.attr !== target) return false;
+        } else {
+          if (groupFilter === 'other') {
+            if (row.group !== 'other' && row.group !== 'recipe') return false;
+          } else if (row.group !== groupFilter) {
+            return false;
+          }
+        }
+      } else if (category === 'items' && !q && row.group === 'recipe') {
+        // Hide cluttering recipe stubs in the default unfiltered list unless searched
+        return false;
+      }
+      return matchesQuery(row, q);
+    });
+  }, [list, query, groupFilter, category]);
 
   const toggleOpen = (key) => {
     setOpen((prev) => {
@@ -482,6 +540,14 @@ function App() {
             </span>
           )}
         </div>
+
+        <button
+          className="copy-cmd-btn"
+          title="sv_cheats 1; script_reload_code bots/fretbots"
+          onClick={() => copyCommand('sv_cheats 1; script_reload_code bots/fretbots', 'fretbots')}
+        >
+          {copiedKey === 'fretbots' ? t('已复制 fretbots', 'Copied fretbots') : 'fretbots脚本'}
+        </button>
 
         <div className="toolbar-right">
           <button className="lang-switch" onClick={() => setLang(lang === 'zh' ? 'en' : 'zh')}>
@@ -563,6 +629,18 @@ function App() {
             {query && <button className="search-clear" onClick={() => setQuery('')}>×</button>}
           </div>
 
+          <div className="group-tabs">
+            {groupOptions.map((opt) => (
+              <button
+                key={opt.id}
+                className={groupFilter === opt.id ? 'active' : ''}
+                onClick={() => setGroupFilter(opt.id)}
+              >
+                {lang === 'zh' ? opt.zh : opt.en}
+              </button>
+            ))}
+          </div>
+
           {/* The list stays mounted while the detail pane loads; only the pane shows a spinner. */}
           <div className="sidebar-content">
             {!gamePath ? (
@@ -581,7 +659,16 @@ function App() {
                       className={`item-card ${selectedId === row.id ? 'selected' : ''}`}
                       onClick={() => handleSelectItem(row.id)}
                     >
+                      <EntityIcon
+                        kind={isHero ? 'hero-icon' : 'item'}
+                        name={isHero ? row.id : (row.texture || row.id)}
+                        rev={iconRev}
+                        className={isHero ? 'list-icon hero' : 'list-icon item'}
+                      />
                       <div className="item-name">{lang === 'zh' ? row.name_zh : row.name_en}</div>
+                      {row.neutralTier != null && (
+                        <span className="tier-badge">T{row.neutralTier}</span>
+                      )}
                       {n > 0 && <span className="modified-badge">{n}</span>}
                     </div>
                   );
@@ -593,23 +680,60 @@ function App() {
 
         <main className="editor-panel">
           {!selectedId ? (
-            <div className="welcome">
-              <h2>{t('欢迎使用 D2Forge', 'Welcome to D2Forge')}</h2>
-              <p>{t('从左侧选择项目开始编辑。技能与天赋排在属性之前，点击标题即可展开。',
-                   'Pick something on the left. Abilities and talents come before stats — click a header to expand.')}</p>
-            </div>
+            !gamePath || bootLoading ? (
+              <div className="welcome">
+                <h2>{t('欢迎使用 D2Forge', 'Welcome to D2Forge')}</h2>
+                <p>{t('请先在右上角选择 Dota 2 游戏路径，加载完成后即可浏览或搜索英雄与物品。',
+                     'Select your Dota 2 game path in the top-right to browse or search heroes and items.')}</p>
+              </div>
+            ) : (
+              <OverviewGrid
+                category={category}
+                items={filtered}
+                changes={changes}
+                lang={lang}
+                iconRev={iconRev}
+                onSelect={handleSelectItem}
+                t={t}
+              />
+            )
           ) : detailLoading && !selectedData ? (
-            <div className="welcome"><p>{t('加载中…', 'Loading…')}</p></div>
+            <div className="welcome"><p>{t('加载中…', 'Loading…')} </p></div>
           ) : !selectedData ? (
             <div className="welcome"><p>{t('加载失败', 'Load failed')}</p></div>
           ) : (
             <div className="editor-content">
               <div className="editor-header">
-                <div>
-                  <h2>{title}</h2>
-                  <span className="subtitle">{selectedId}</span>
+                <div className="editor-title-wrap">
+                  <EntityIcon
+                    kind={isHero ? 'hero' : 'item'}
+                    name={isHero ? selectedId : (itemList.find((i) => i.id === selectedId)?.texture || selectedId)}
+                    rev={iconRev}
+                    className={isHero ? 'header-icon hero' : 'header-icon item'}
+                  />
+                  <div>
+                    <h2>{title}</h2>
+                    <span className="subtitle">{selectedId}</span>
+                  </div>
                 </div>
                 <div className="editor-actions">
+                  <button
+                    onClick={() => { setSelectedId(null); setSelectedData(null); }}
+                    title={t('返回图标总览', 'Back to icon overview')}
+                  >
+                    {t('总览', 'Overview')}
+                  </button>
+                  {!isHero && selectedId && (
+                    <button
+                      className="copy-cmd-btn"
+                      title={`-item ${selectedId}`}
+                      onClick={() => copyCommand(`-item ${selectedId}`, `item:${selectedId}`)}
+                    >
+                      {copiedKey === `item:${selectedId}`
+                        ? t('已复制 -item', 'Copied -item')
+                        : t('复制 -item', 'Copy -item')}
+                    </button>
+                  )}
                   {isHero && (
                     <button
                       onClick={() => setOpen(allOpen ? new Set() : new Set(['abilities', 'talents']))}
@@ -642,11 +766,43 @@ function App() {
                             key={ability.id}
                             id={key}
                             level={2}
+                            icon={(
+                              <EntityIcon
+                                kind="ability"
+                                name={ability.texture || ability.id}
+                                rev={iconRev}
+                                className="ability-icon"
+                              />
+                            )}
                             title={lang === 'zh' ? ability.name_zh : ability.name_en}
                             subtitle={ability.id}
                             open={open.has(key)}
                             onToggle={() => toggleOpen(key)}
                             badge={n}
+                            actions={(
+                              <>
+                                {ability.isHiddenOrUnlearnable && (
+                                  <span
+                                    className="ability-warn-badge"
+                                    title={t(
+                                      '该技能标记为隐藏或不可学习（多为衍生子技能），单独使用控制台添加可能无法生效',
+                                      'Marked HIDDEN / NOT_LEARNABLE (often a sub-ability); create_ability alone may not work'
+                                    )}
+                                  >
+                                    {t('隐藏/衍生', 'Hidden/Sub')}
+                                  </span>
+                                )}
+                                <button
+                                  className="copy-cmd-btn small"
+                                  title={`create_ability ${ability.id}`}
+                                  onClick={() => copyCommand(`create_ability ${ability.id}`, `ab:${ability.id}`)}
+                                >
+                                  {copiedKey === `ab:${ability.id}`
+                                    ? t('已复制', 'Copied')
+                                    : t('复制 create_ability', 'Copy create_ability')}
+                                </button>
+                              </>
+                            )}
                           >
                             <FieldGroups
                               ability={ability}
@@ -767,6 +923,7 @@ function App() {
                 </>
               ) : (
                 <>
+                  <DescriptionBox entity={selectedData.item} lang={lang} t={t} />
                   <Accordion id="item-stats" title={t('物品属性', 'Item Stats')} open={open.has('item-stats')} onToggle={() => toggleOpen('item-stats')}>
                     <div className="field-grid">
                       {(selectedData.item?.scalars || []).map((field) => (
@@ -785,41 +942,17 @@ function App() {
                   </Accordion>
 
                   <Accordion id="item-values" title={t('数值参数', 'Ability Values')} open={open.has('item-values')} onToggle={() => toggleOpen('item-values')}>
-                    <div className="field-grid">
-                      {(selectedData.item?.values || []).map((row) => {
-                        const fieldPath = `values.${row.key}`;
-                        const changeKey = `items/${selectedId}/${fieldPath}`;
-                        const change = changes.get(changeKey);
-                        return (
-                          <div key={row.key} className={`field-group ${change ? 'modified' : ''}`}>
-                            <label>
-                              {lang === 'zh' ? row.label_zh : row.label_en}
-                              {!row.localized && <span className="unlocalized-tip"> raw</span>}
-                            </label>
-                            <input
-                              type="text"
-                              value={change ? change.newValue : row.value}
-                              onChange={(e) => handleFieldChange(fieldPath, e.target.value)}
-                            />
-                            {change && (
-                              <span className="original-value">
-                                {t('原始值', 'Original')}: {change.oldValue}
-                                <button className="revert-one" onClick={() => handleRevertField(fieldPath)}>
-                                  {t('还原', 'Revert')}
-                                </button>
-                              </span>
-                            )}
-                            {row.extras?.length > 0 && (
-                              <div className="extras">
-                                {row.extras.map((ex) => (
-                                  <span key={ex.key} className="extra-badge">{ex.key}: {ex.value}</span>
-                                ))}
-                              </div>
-                            )}
-                          </div>
-                        );
-                      })}
-                    </div>
+                    <ValueFieldGrid
+                      rows={selectedData.item?.values || []}
+                      pathPrefix="values"
+                      category="items"
+                      selectedId={selectedId}
+                      changes={changes}
+                      lang={lang}
+                      onEdit={handleFieldChange}
+                      onRevert={handleRevertField}
+                      t={t}
+                    />
                   </Accordion>
                 </>
               )}
@@ -839,17 +972,133 @@ function App() {
 
 /* ------------------------------ components ----------------------------- */
 
-function Accordion({ id, title, subtitle, badge, open, onToggle, level = 1, children }) {
+function EntityIcon({ kind, name, rev, className }) {
+  const [failed, setFailed] = useState(false);
+  useEffect(() => { setFailed(false); }, [kind, name, rev]);
+  if (!name || failed) return null;
+  const src = `d2icon://${kind}/${encodeURIComponent(name)}${rev ? `?v=${rev}` : ''}`;
+  return (
+    <img
+      src={src}
+      alt=""
+      loading="lazy"
+      className={className}
+      onError={() => setFailed(true)}
+    />
+  );
+}
+
+const HERO_SECTIONS = [
+  { id: 'str', zh: '力量英雄', en: 'Strength' },
+  { id: 'agi', zh: '敏捷英雄', en: 'Agility' },
+  { id: 'int', zh: '智力英雄', en: 'Intelligence' },
+  { id: 'all', zh: '全才英雄', en: 'Universal' },
+  { id: 'other', zh: '其他', en: 'Other' },
+];
+
+const ITEM_SECTIONS = [
+  { id: 'basic', zh: '基础物品', en: 'Basic Items' },
+  { id: 'upgrade', zh: '升级物品', en: 'Upgraded Items' },
+  { id: 'neutral', zh: '中立物品', en: 'Neutral Items' },
+  { id: 'enhancement', zh: '中立附魔', en: 'Neutral Enchantments' },
+  { id: 'other', zh: '其他 / 已移除物品', en: 'Other / Legacy Items', collapsedByDefault: true },
+];
+
+function OverviewGrid({ category, items, changes, lang, iconRev, onSelect, t }) {
+  const [showOther, setShowOther] = useState(false);
+  const isHero = category === 'heroes';
+  const sections = isHero ? HERO_SECTIONS : ITEM_SECTIONS;
+
+  const grouped = useMemo(() => {
+    const buckets = new Map(sections.map((s) => [s.id, []]));
+    for (const row of items) {
+      let key = isHero ? (row.attr || 'other') : (row.group || 'other');
+      if (!isHero && key === 'recipe') key = 'other';
+      if (!buckets.has(key)) key = 'other';
+      buckets.get(key).push(row);
+    }
+    return buckets;
+  }, [items, isHero, sections]);
+
+  if (!items.length) {
+    return <div className="welcome"><p>{t('没有匹配项', 'No matches')}</p></div>;
+  }
+
+  return (
+    <div className="overview-wrap">
+      {sections.map((sec) => {
+        const rows = grouped.get(sec.id) || [];
+        if (!rows.length) return null;
+        const collapsed = sec.collapsedByDefault && !showOther && items.length > 30;
+        return (
+          <section key={sec.id} className="overview-section">
+            <div className="overview-sec-head">
+              <h3>
+                {lang === 'zh' ? sec.zh : sec.en}
+                <span className="overview-count">{rows.length}</span>
+              </h3>
+              {sec.collapsedByDefault && items.length > 30 && (
+                <button className="overview-toggle" onClick={() => setShowOther((v) => !v)}>
+                  {showOther ? t('收起', 'Hide') : t('展开查看', 'Show')}
+                </button>
+              )}
+            </div>
+            {!collapsed && (
+              <div className={`overview-grid ${isHero ? 'heroes' : 'items'}`}>
+                {rows.map((row) => {
+                  const n = countChanges(changes, `${category}/${row.id}/`);
+                  return (
+                    <button
+                      key={row.id}
+                      className={`grid-card ${n > 0 ? 'modified' : ''}`}
+                      onClick={() => onSelect(row.id)}
+                      title={`${lang === 'zh' ? row.name_zh : row.name_en} (${row.id})`}
+                    >
+                      <EntityIcon
+                        kind={isHero ? 'hero' : 'item'}
+                        name={isHero ? row.id : (row.texture || row.id)}
+                        rev={iconRev}
+                        className={isHero ? 'grid-icon hero' : 'grid-icon item'}
+                      />
+                      <span className="grid-name">{lang === 'zh' ? row.name_zh : row.name_en}</span>
+                      {row.neutralTier != null && <span className="grid-tier">T{row.neutralTier}</span>}
+                      {n > 0 && <span className="grid-badge">{n}</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            )}
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
+function Accordion({ id, title, subtitle, badge, icon, actions, open, onToggle, level = 1, children }) {
   return (
     <section className={`accordion level-${level} ${open ? 'open' : ''}`} data-id={id}>
-      <button className="accordion-head" onClick={onToggle} aria-expanded={open}>
+      <div
+        className="accordion-head"
+        role="button"
+        tabIndex={0}
+        onClick={onToggle}
+        onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onToggle(); } }}
+        aria-expanded={open}
+      >
         <span className="chevron">{open ? '▾' : '▸'}</span>
+        {icon}
         <span className="accordion-title">{title}</span>
         {subtitle && <span className="accordion-sub">{subtitle}</span>}
         {badge > 0 && <span className="modified-badge">{badge}</span>}
         <span className="accordion-spacer" />
+        {actions && (
+          <div className="accordion-actions" onClick={(e) => e.stopPropagation()}>
+            {actions}
+          </div>
+        )}
         <span className="accordion-hint">{open ? '收起' : '展开'}</span>
-      </button>
+      </div>
       {open && <div className="accordion-body">{children}</div>}
     </section>
   );
@@ -876,9 +1125,110 @@ function FieldInput({ field, changeKey, changes, lang, onEdit, onRevert, t }) {
   );
 }
 
+function renderHighlightedDesc(text) {
+  if (!text) return null;
+  const parts = text.split(/(%[a-zA-Z0-9_]+%)/g);
+  return parts.map((part, i) =>
+    /^%[a-zA-Z0-9_]+%$/.test(part)
+      ? <code key={i} className="desc-var">{part}</code>
+      : part
+  );
+}
+
+function DescriptionBox({ entity, lang, t }) {
+  if (!entity) return null;
+  const desc = lang === 'zh' ? (entity.description_zh || entity.description_en) : (entity.description_en || entity.description_zh);
+  const scepter = lang === 'zh' ? (entity.scepter_zh || entity.scepter_en) : (entity.scepter_en || entity.scepter_zh);
+  const shard = lang === 'zh' ? (entity.shard_zh || entity.shard_en) : (entity.shard_en || entity.shard_zh);
+  if (!desc && !scepter && !shard) return null;
+
+  return (
+    <div className="ability-desc-box">
+      {desc && <div className="desc-main">{renderHighlightedDesc(desc)}</div>}
+      {scepter && (
+        <div className="desc-upgrade">
+          <span className="desc-tag scepter">{t('神杖', 'Scepter')}</span>
+          <span>{renderHighlightedDesc(scepter)}</span>
+        </div>
+      )}
+      {shard && (
+        <div className="desc-upgrade">
+          <span className="desc-tag shard">{t('魔晶', 'Shard')}</span>
+          <span>{renderHighlightedDesc(shard)}</span>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ValueFieldGrid({ rows, pathPrefix, category, selectedId, changes, lang, onEdit, onRevert, t }) {
+  if (!rows?.length) return null;
+
+  const coreRows = rows.filter((r) => r.localized);
+  const rawRows = rows.filter((r) => !r.localized);
+
+  const renderCard = (row) => {
+    const fieldPath = `${pathPrefix}.${row.key}`;
+    const changeKey = `${category}/${selectedId}/${fieldPath}`;
+    const change = changes.get(changeKey);
+    return (
+      <div key={row.key} className={`field-group ${change ? 'modified' : ''}`}>
+        <label title={row.label_raw}>
+          {lang === 'zh' ? row.label_zh : row.label_en}
+          {!row.localized && <span className="unlocalized-tip"> raw</span>}
+        </label>
+        {!row.localized && row.label_raw && (
+          <span className="raw-key-hint">{row.label_raw}</span>
+        )}
+        <input
+          type="text"
+          value={change ? change.newValue : row.value}
+          onChange={(e) => onEdit(fieldPath, e.target.value)}
+        />
+        {change && (
+          <span className="original-value">
+            {t('原始值', 'Original')}: {change.oldValue}
+            <button className="revert-one" onClick={() => onRevert(fieldPath)}>
+              {t('还原', 'Revert')}
+            </button>
+          </span>
+        )}
+        {row.extras?.length > 0 && (
+          <div className="extras">
+            {row.extras.map((ex) => (
+              <span key={ex.key} className="extra-badge">{ex.key}: {ex.value}</span>
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  };
+
+  if (!coreRows.length) {
+    return <div className="field-grid">{rawRows.map(renderCard)}</div>;
+  }
+
+  const hasModifiedRaw = rawRows.some((r) => changes.has(`${category}/${selectedId}/${pathPrefix}.${r.key}`));
+
+  return (
+    <>
+      <div className="field-grid">{coreRows.map(renderCard)}</div>
+      {rawRows.length > 0 && (
+        <details className="raw-params-group" open={hasModifiedRaw}>
+          <summary>
+            {t(`内部 / 隐藏参数 (${rawRows.length})`, `Internal / Hidden Parameters (${rawRows.length})`)}
+          </summary>
+          <div className="field-grid">{rawRows.map(renderCard)}</div>
+        </details>
+      )}
+    </>
+  );
+}
+
 function FieldGroups({ ability, prefix, category, selectedId, changes, lang, onEdit, onRevert, t }) {
   return (
     <>
+      <DescriptionBox entity={ability} lang={lang} t={t} />
       {ability.scalars?.length > 0 && (
         <div className="field-grid">
           {ability.scalars.map((field) => (
@@ -896,43 +1246,17 @@ function FieldGroups({ ability, prefix, category, selectedId, changes, lang, onE
         </div>
       )}
 
-      {ability.values?.length > 0 && (
-        <div className="field-grid">
-          {ability.values.map((row) => {
-            const fieldPath = `${prefix}.${ability.id}.values.${row.key}`;
-            const changeKey = `${category}/${selectedId}/${fieldPath}`;
-            const change = changes.get(changeKey);
-            return (
-              <div key={row.key} className={`field-group ${change ? 'modified' : ''}`}>
-                <label>
-                  {lang === 'zh' ? row.label_zh : row.label_en}
-                  {!row.localized && <span className="unlocalized-tip"> raw</span>}
-                </label>
-                <input
-                  type="text"
-                  value={change ? change.newValue : row.value}
-                  onChange={(e) => onEdit(fieldPath, e.target.value)}
-                />
-                {change && (
-                  <span className="original-value">
-                    {t('原始值', 'Original')}: {change.oldValue}
-                    <button className="revert-one" onClick={() => onRevert(fieldPath)}>
-                      {t('还原', 'Revert')}
-                    </button>
-                  </span>
-                )}
-                {row.extras?.length > 0 && (
-                  <div className="extras">
-                    {row.extras.map((ex) => (
-                      <span key={ex.key} className="extra-badge">{ex.key}: {ex.value}</span>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
+      <ValueFieldGrid
+        rows={ability.values || []}
+        pathPrefix={`${prefix}.${ability.id}.values`}
+        category={category}
+        selectedId={selectedId}
+        changes={changes}
+        lang={lang}
+        onEdit={onEdit}
+        onRevert={onRevert}
+        t={t}
+      />
     </>
   );
 }
